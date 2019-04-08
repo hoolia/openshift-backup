@@ -1,0 +1,109 @@
+#!/usr/bin/ansible-playbook -vvv
+---
+- hosts: localhost  # bastion
+  connection: local
+  vars:
+    slave_openshift_hostname: 10.180.26.100
+    slave_openshift_token: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJnbHVzdGVyZnMiLCJrdWJlcm5ldGVzLmlvL3NlcnZpY2VhY2NvdW50L3NlY3JldC5uYW1lIjoiZ2VvcmVwbC10b2tlbi1nY2NsaCIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJnZW9yZXBsIiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9zZXJ2aWNlLWFjY291bnQudWlkIjoiNDhiMzE0MDctZmU0YS0xMWU4LWJmMzgtMDAwZDNhNGYwMTM2Iiwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50OmdsdXN0ZXJmczpnZW9yZXBsIn0.gXadbgZkwLtOTex4tcQjGII4npGySZw7sLhRenEXA1cQfgBbM4jjkkcbabms6HVzmBB6Z1iN8Lv2qPSrlyyQKgsLeAFmkwOHKZM7zBGWJxEOum3TSFJDu9b5zonsIHBLiNvITCUVlxZhmvfo9NvQlfJR_CIzKNeZdB-jpH2bOu2_sKrbXCvm-E1lTypm7LmnsHvcXsQ7p1d97-EBe2GUc1Aesle0s6_XV5yaEsUVuCwZlyX2aCQIjZFOEaHDmIW2FznWQdSeff7sUvZEVMQUQOcwQlOIot0FL7u00YsL7NJQwVDng_rRDORBmlm1AXiPnyklJA_ehpcgpt-BXWElbw'
+
+  tasks:
+### Gather OpenShift facts ###
+  - name: OpenShift Login of master cluster
+    shell: "oc project glusterfs"
+  - shell: "oc config current-context"
+    register: openshift_master_context
+
+  - name: Sync all PVCs from Master to Slave cluster
+    block:
+    - name: OpenShift Login of slave cluster
+      shell: "NO_PROXY={{ slave_openshift_hostname }} oc login --token={{ slave_openshift_token }} https://{{ slave_openshift_hostname }}:443 --insecure-skip-tls-verify && NO_PROXY={{ slave_openshift_hostname }} oc project glusterfs" #TODO: beautify
+    - shell: "oc config current-context"
+      register: openshift_slave_context
+  
+    - name: Register OpenShift Login credentials
+      set_fact:
+        oc_master: "oc --context={{ openshift_master_context.stdout }}"
+        oc_slave:  "NO_PROXY={{ slave_openshift_hostname }} oc --context={{ openshift_slave_context.stdout  }}"
+### Gather OpenShift facts ###
+  
+### Gluster-Block support ###
+    - name: Create blockhost PVC
+      shell: |
+        #set -x
+        gluster_cli() {
+          {{ oc_master }} -n glusterfs rsh ds/glusterfs-storage bash -c "gluster $*"
+        } 
+        heketi_cli() {
+          {{ oc_master }} -n glusterfs rsh dc/heketi-storage bash -c "heketi-cli --user admin --secret \$HEKETI_ADMIN_KEY $*"
+        } 
+        VOLUMES=`heketi_cli volume list |sed 's/   Cluster.*//g' |sed 's/Id://'`
+        for VOLUME in $VOLUMES; do
+          heketi_cli volume info $VOLUME |grep 'Block: true' 
+          if [ "$?" == "0" ]; then
+            SIZE=`heketi_cli volume info $VOLUME  |grep "^Size: "        |sed 's/Size: //'`
+            ID=`  heketi_cli volume info $VOLUME  |grep "^Volume Id: "   |sed 's/Volume Id: //'`
+            NAME=`heketi_cli volume info $VOLUME  |grep "^Name: "        |sed 's/Name: //'`
+            #gluster_cli volume set $VOLUME cluster.consistent_metadata on 
+            #gluster_cli volume set $VOLUME server.ssl on
+            #gluster_cli volume set $VOLUME client.ssl on
+            #gluster_cli volume set $VOLUME server.allow-insecure off
+            {{ oc_master }} -n backup process -p NAME=$NAME -p SHORTID="${ID: -8}" -p ID=$ID -p SIZE=$SIZE blockhost-pvc |{{ oc_master }} -n backup create -f -
+          fi
+        done
+### Gluster-Block support ###
+        
+
+### Gluster-File replication ###
+    - name: Copy all PVCs
+      shell: |
+        #set -x
+        {{ oc_master }} observe pvc --all-namespaces --once \
+        |while read IGNORE1 IGNORE2 IGNORE3 IGNORE4 IGNORE5 PROJECT PVC
+        do
+          [ "$PROJECT" == "" ] && continue 
+          {{ oc_slave }} adm new-project $PROJECT  #TODO: how to correctly copy project preserving owner/annotations/labels/etc....
+          {{ oc_master }} -n $PROJECT get --export -o yaml pvc/$PVC |egrep -v "volumeName|pv.kubernetes.io" |{{ oc_slave }} -n $PROJECT apply -f -
+        done
+  
+    - name: Enable geo-replication on all PVCs
+      shell: |
+        #set -x
+        SLAVE_ENDPOINT=`{{ oc_slave }} -n glusterfs get ep/heketi-db-storage-endpoints -o jsonpath='{.subsets[0].addresses[0].ip}'`
+        GLUSTER_POD=`{{ oc_master }} -n glusterfs get po -o custom-columns=name:.metadata.name -l glusterfs=storage-pod --no-headers |head -n1`
+        {{ oc_slave }} observe pvc --all-namespaces --exit-after=30s \
+          -a '{ .spec.volumeName }' \
+          -a '{ .metadata.annotations.volume\.beta\.kubernetes\.io\/storage-provisioner }' \
+        |while read IGNORE1 IGNORE2 IGNORE3 IGNORE4 IGNORE5 PROJECT PVC SLAVE_PV STORAGECLASS
+        do
+          echo "Checking PVC '$PROJECT/$PVC = $SLAVE_PV' ($STORAGECLASS)"
+          # Check if PVC is bound to PV
+          [ "$SLAVE_PV"  == ""     ] && continue  #TODO: beautify
+          [ "$SLAVE_PV"  == "\"\"" ] && continue
+          [ "$STORAGECLASS" != "kubernetes.io/glusterfs" ] && continue
+
+          MASTER_PV=`{{ oc_master }} -n $PROJECT get pvc/$PVC -o jsonpath={.spec.volumeName}`
+          [ "$MASTER_PV" == ""     ] && continue  #Ignore PVC that exist on Slave side, but not on Master side
+
+          echo "Slave PVC '$PROJECT/$PVC = $SLAVE_PV' ready. Setting up Geo-Replication."
+  
+          # Get gluster volume ids
+           SLAVE_VOLUME=`{{ oc_slave }}  get pv/$SLAVE_PV  -o jsonpath={.spec.glusterfs.path}` 
+          MASTER_VOLUME=`{{ oc_master }} get pv/$MASTER_PV -o jsonpath={.spec.glusterfs.path}` 
+  
+          # Setup Gluster-Gluster Geo-Replication
+          # TODO BUG: `oc rsh` breaks the oc observe loop. had to use `oc exec`.
+          GEO_SETUP="{{ oc_master }} -n glusterfs exec $GLUSTER_POD gluster volume geo-replication $MASTER_VOLUME $SLAVE_ENDPOINT::$SLAVE_VOLUME "
+          echo "$GEO_SETUP start"
+          $GEO_SETUP status >/dev/null 2>&1
+          if [ "$?" == "1" ]; then
+            $GEO_SETUP create ssh-port 2222 push-pem
+            $GEO_SETUP config ssh_port 2222
+            $GEO_SETUP config remote-gsyncd /usr/libexec/glusterfs/gsyncd
+            $GEO_SETUP config gluster_log_file /var/log/glusterfs/geo-replication/$MASTER_VOLUME.log    
+            $GEO_SETUP start
+          fi
+        done
+### Gluster-File replication ###
+    always: 
+    - name: Reset OpenShift login back to master cluster
+      shell: "oc config use-context {{ openshift_master_context.stdout }}"

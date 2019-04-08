@@ -1,0 +1,3 @@
+#!/bin/sh
+oc -n glusterfs rsh dc/heketi-storage \
+  bash -c "heketi-cli --user admin --secret \$HEKETI_ADMIN_KEY $*"

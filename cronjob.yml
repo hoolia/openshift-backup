@@ -1,0 +1,169 @@
+---
+kind: Template
+apiVersion: v1
+metadata:
+  name: backup
+  annotations:
+    description: Scheduled Task to Regularly Backup OpenShift
+    iconClass: icon-shadowman
+    tags: management,cronjob,backup
+labels:
+  template: backup
+objects:
+- kind: SecurityContextConstraints
+  metadata:
+    name: backup
+  allowHostDirVolumePlugin: true
+  allowHostIPC: false
+  allowHostNetwork: false
+  allowHostPID: false
+  allowHostPorts: false
+  allowPrivilegedContainer: true
+  allowedCapabilities:
+  - '*'
+  allowedFlexVolumes: []
+  apiVersion: v1
+  defaultAddCapabilities: []
+  fsGroup:
+    type: RunAsAny
+  priority: null
+  readOnlyRootFilesystem: false
+  requiredDropCapabilities: []
+  runAsUser:
+    type: RunAsAny
+  seLinuxContext:
+    type: RunAsAny
+  seccompProfiles:
+  - '*'
+  supplementalGroups:
+    type: RunAsAny
+  users:
+  - system:serviceaccount:${NAMESPACE}:${JOB_NAME}
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: backup
+  spec:
+    accessModes:
+    - ReadWriteMany
+    resources:
+      requests:
+        storage: "${VOLUME_SIZE}"
+- kind: CronJob
+  apiVersion: batch/v1beta1
+  metadata:
+    name: "${JOB_NAME}"
+  spec:
+    schedule: "${SCHEDULE}"
+    concurrencyPolicy: Forbid
+    successfulJobsHistoryLimit: "${{SUCCESS_JOBS_HISTORY_LIMIT}}"
+    failedJobsHistoryLimit: "${{FAILED_JOBS_HISTORY_LIMIT}}"
+    jobTemplate:
+      spec:
+        template:
+          spec:
+            containers:
+            - name: "${JOB_NAME}"
+              image: registry.access.redhat.com/openshift3/jenkins-slave-base-rhel7
+              command:
+              - "/bin/bash"
+              - "-c"
+              - "curl -sSL https://raw.githubusercontent.com/hoolia/openshift-backup/master/backup.sh | bash"
+              env:
+              - name: GIT_URL
+                value: "${GIT_URL}"
+              - name: DEPLOYMENT_TYPE
+                value: "${DEPLOYMENT_TYPE}"
+              - name: DIR
+                value: "${DIR}"
+              volumeMounts:
+              - mountPath: /backup
+                name: backup-pv
+              - mountPath: /host
+                name: host
+            restartPolicy: Never
+            terminationGracePeriodSeconds: 30
+            activeDeadlineSeconds: 14400
+            dnsPolicy: ClusterFirst
+            nodeSelector: ${{NODE_SELECTOR}}
+            serviceAccountName: "${JOB_NAME}"
+            serviceAccount: "${JOB_NAME}"
+            securityContext:
+              runAsUser: 0
+            volumes:
+            - name: backup-pv
+              persistentVolumeClaim:
+                claimName: backup
+            - name: host
+              hostPath:
+                path: /
+- kind: ClusterRoleBinding
+  apiVersion: v1
+  metadata:
+    name: ops:backup
+    labels:
+      template: "backup"
+  roleRef:
+    name: cluster-reader
+  subjects:
+  - kind: ServiceAccount
+    name: ${JOB_NAME}
+  userNames:
+  - system:serviceaccount:${NAMESPACE}:${JOB_NAME}
+- kind: ServiceAccount
+  apiVersion: v1
+  metadata:
+    name: ${JOB_NAME}
+    labels:
+      template: "backup"
+parameters:
+- name: JOB_NAME
+  displayName: Job Name
+  description: Name of the Scheduled Job to Create.
+  value: backup
+  required: true
+- name: SCHEDULE
+  displayName: Cron Schedule
+  description: Cron Schedule to Execute the Job
+  value: 0 0 * * *
+  required: true
+- name: VOLUME_SIZE
+  displayName: Backup Volume size
+  description: Size of Persistent Volume for storing Backups
+  value: 50Gi
+  required: true
+- name: DEPLOYMENT_TYPE
+  displayName: OpenShift Deployment Type 
+  description: atomic-enterprise or origin
+  value: origin
+  required: true
+- name: GIT_REPO
+  displayName: Git Repo
+  description: Optionally push backup to this Git repository
+  value: ''
+  required: false
+- name: DIR
+  displayName: Backup directory
+  description: subdirectory in PV
+  value: '/backup/openshift'
+  required: true
+- name: SUCCESS_JOBS_HISTORY_LIMIT
+  displayName: Successful Job History Limit
+  description: The number of successful jobs that will be retained
+  value: '5'
+  required: true
+- name: FAILED_JOBS_HISTORY_LIMIT
+  displayName: Failed Job History Limit
+  description: The number of failed jobs that will be retained
+  value: '5'
+  required: true
+- name: "NAMESPACE"
+  displayName: "Namespace where this is deployed"
+  description: "Namespace where this is deployed."
+  value: "ops"
+  required: true
+- name: "NODE_SELECTOR"
+  displayName: "Master node selector"
+  description: "Node selector to run on master"
+  value: '{"node-role.kubernetes.io/master": "true"}'
+  required: true

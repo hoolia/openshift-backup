@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: "Pod"
+metadata:
+  name: "geo-test-pod"
+spec:
+  containers:
+  - name: "geo-test-pod"
+    image: openshift3/jenkins-slave-base-rhel7:v3.9
+    command: 
+      - "/test-script.sh"
+    volumeMounts:
+    - mountPath: /test
+      name: geo
+    - mountPath: /test-script.sh
+      name: test-script
+      subPath: test-script.sh
+  volumes:
+  - name: geo
+    persistentVolumeClaim:
+      claimName: "geo"
+  - configMap:
+      defaultMode: 493
+      name: test-script
+    name: test-script
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: test-script
+data:
+  test-script.sh: |
+    #!/bin/bash
+    while true
+    do
+      dd if=/dev/zero of=/test/$(date +%s) count=1024 bs=1024
+      sleep 60
+      echo "testing"
+    done

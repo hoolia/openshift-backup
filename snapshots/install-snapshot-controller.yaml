@@ -1,0 +1,175 @@
+---
+- hosts: masters[0]
+  connection: local
+  vars:
+    k8s_objects:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        creationTimestamp: null
+        name: gluster-scripts
+        namespace: backup
+      data:
+        gluster: |
+          #!/bin/sh
+          oc -n glusterfs rsh ds/glusterfs-storage gluster $@
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: snapshot-controller-runner
+        namespace: backup
+    - apiVersion: v1
+      kind: SecurityContextConstraints
+      metadata:
+        creationTimestamp: null
+        name: backup
+      allowHostDirVolumePlugin: true
+      allowPrivilegedContainer: true
+      fsGroup:
+        type: RunAsAny
+      groups: []
+      priority: null
+      runAsUser:
+        type: RunAsAny
+      seLinuxContext:
+        type: RunAsAny
+      supplementalGroups:
+        type: RunAsAny
+      users:
+      - system:serviceaccount:backup:backup
+      - system:serviceaccount:backup:snapshot-controller-runner
+      volumes:
+      - hostPath
+      - configMap
+      - secret
+    - apiVersion: v1
+      groupNames: null
+      kind: RoleBinding
+      metadata:
+        creationTimestamp: null
+        name: backup
+        namespace: glusterfs
+      roleRef:
+        name: edit
+      subjects:
+      - kind: ServiceAccount
+        name: backup
+        namespace: backup
+      userNames:
+      - system:serviceaccount:backup:backup
+      - system:serviceaccount:backup:snapshot-controller-runner
+    - kind: ClusterRole
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: snapshot-controller-role
+      rules:
+      - apiGroups: [""]
+        resources: ["persistentvolumes"]
+        verbs: ["get", "list", "watch", "create", "delete"]
+      - apiGroups: [""]
+        resources: ["persistentvolumeclaims"]
+        verbs: ["get", "list", "watch", "update"]
+      - apiGroups: ["storage.k8s.io"]
+        resources: ["storageclasses"]
+        verbs: ["get", "list", "watch"]
+      - apiGroups: [""]
+        resources: ["events"]
+        verbs: ["list", "watch", "create", "update", "patch"]
+      - apiGroups: ["apiextensions.k8s.io"]
+        resources: ["customresourcedefinitions"]
+        verbs: ["create", "list", "watch", "delete"]
+      - apiGroups: ["volumesnapshot.external-storage.k8s.io"]
+        resources: ["volumesnapshots"]
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+      - apiGroups: ["volumesnapshot.external-storage.k8s.io"]
+        resources: ["volumesnapshotdatas"]
+        verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    - apiVersion: v1
+      kind: ClusterRole
+      metadata:
+        name: volumesnapshot-admin
+      rules:
+      - apiGroups:
+        - "volumesnapshot.external-storage.k8s.io"
+        attributeRestrictions: null
+        resources:
+        - volumesnapshots
+        - volumesnapshotdata
+        verbs:
+        - create
+        - delete
+        - deletecollection
+        - get
+        - list
+        - patch
+        - update
+        - watch
+    - apiVersion: rbac.authorization.k8s.io/v1beta1
+      kind: ClusterRoleBinding
+      metadata:
+        name: snapshot-controller
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: snapshot-controller-role
+      subjects:
+      - kind: ServiceAccount
+        name: snapshot-controller-runner
+        namespace: backup
+    - kind: Deployment
+      apiVersion: extensions/v1beta1
+      metadata:
+        name: snapshot-controller
+        namespace: backup
+      spec:
+        replicas: 1
+        strategy:
+          type: Recreate
+        template:
+          metadata:
+            labels:
+              app: snapshot-controller
+          spec:
+            serviceAccountName: snapshot-controller-runner
+            containers:
+            - name: snapshot-controller
+              image: "registry.access.redhat.com/openshift3/snapshot-controller:latest" #TODO: Hardcode version
+              imagePullPolicy: "IfNotPresent"
+              volumeMounts:
+              - mountPath: /usr/bin/oc
+                name: oc-client
+              - mountPath: /usr/local/bin
+                name: gluster-scripts
+            - name: snapshot-provisioner
+              image: "registry.access.redhat.com/openshift3/snapshot-provisioner:latest" #TODO: Hardcode version
+              imagePullPolicy: "IfNotPresent"
+              volumeMounts:
+              - mountPath: /bin/oc
+                name: oc-client
+              - mountPath: /usr/local/bin
+                name: gluster-scripts
+            volumes:
+            - name: oc-client
+              hostPath:
+                path: /bin/oc
+            - name: gluster-scripts
+              configMap:
+                defaultMode: 365
+                name: gluster-scripts
+    - kind: StorageClass
+      apiVersion: storage.k8s.io/v1
+      metadata:
+        name: snapshot-promoter
+      provisioner: volumesnapshot.external-storage.k8s.io/snapshot-promoter
+
+  tasks:
+  - name: Create project
+    shell: "oc adm new-project --description=Backups --node-selector=kubernetes.io/hostname={{ NODE_SELECTOR | default(cluster_name + '-master-0') }} backup"
+
+  - name: Create k8s objects
+    command: "oc create -f -"
+    args:
+      stdin: "{{ item | to_json }}"
+    with_items:
+    - "{{ k8s_objects }}"
+

@@ -1,0 +1,194 @@
+#!/usr/bin/ansible-playbook -vvv
+---
+- hosts: glusterfs
+  vars:
+    openshift_ca: |
+      # Master OpenShift CA
+      -----BEGIN CERTIFICATE-----
+      MIIC6jCCAdKgAwIBAgIBATANBgkqhkiG9w0BAQsFADAmMSQwIgYDVQQDDBtvcGVu
+      c2hpZnQtc2lnbmVyQDE1NDQ1NTA5NjkwHhcNMTgxMjExMTc1NjA4WhcNMjMxMjEw
+      MTc1NjA5WjAmMSQwIgYDVQQDDBtvcGVuc2hpZnQtc2lnbmVyQDE1NDQ1NTA5Njkw
+      ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDKuaAf4LtIQOSGeWXhoLa6
+      bDXHkKSmlmydeUtIXSXnuNBhx3cFgTNjZVYhi6MLGvgmLFmjEtndnhMYLIh4tdUb
+      QSiFkDZFfWvoVbMVLd1NVRwKtBpdQIXB/XM2cBF061ytcU9xdMly94mX+m+UVtAw
+      GzY5fYyPSboW/yZLHt7chJixHdE1NKjPa5KwLWT02XTzMSnqfKUe+KGdFxtRHzsX
+      LJaH4dTM7y4PpbyTx95JrisyAKSanwfqjClU0fz4dsVZNgJSUEH5gwT3ZeINWaor
+      pBRug81aXGho1SIzQyzSAEiRPfbNeG+RAvaqRETBRbSDZxS/d4Ls3IrhV5jOK2x9
+      AgMBAAGjIzAhMA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MA0GCSqG
+      SIb3DQEBCwUAA4IBAQBJ199HFr9/Mpf82ulfkZAPmoOUbO69ALrk94mpM0NT42uQ
+      DW5VY+K/vjgbuPKLPP7T3WNLJaLkP8vs3mcxTxXiFJsokawUB/jHqwG1Zg5Yzerr
+      JnRmO7BmO+V7IOaNE2aMS+DyhB1+ZwVuxa1s6BQkoe3Dl2jQ/LJ3HnkWCYa0gNh/
+      HcqiDFuD6Fa0sgcRBssimteWDHylbmzHaE2jIu+8ZVEIIgeMef4aFtoai2SVhe52
+      QBSHnezFjOyfdhVTlmegRXU+nHaE6HCpBx7pJVfYRedJPp6BUYSAViP6Q8E9jNlZ
+      VZNLPfEXeMLLtpV8LQKQ8mVTp5mtfsvpXvWK/MYv
+      -----END CERTIFICATE-----
+      # Slave OpenShift CA
+      -----BEGIN CERTIFICATE-----
+      MIIC6jCCAdKgAwIBAgIBATANBgkqhkiG9w0BAQsFADAmMSQwIgYDVQQDDBtvcGVu
+      c2hpZnQtc2lnbmVyQDE1NDQ2NDEzMzEwHhcNMTgxMjEyMTkwMjEwWhcNMjMxMjEx
+      MTkwMjExWjAmMSQwIgYDVQQDDBtvcGVuc2hpZnQtc2lnbmVyQDE1NDQ2NDEzMzEw
+      ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCvJ9Hxwp8FCpseN2qXy+UW
+      7bihpXyDA2kYnMPqlB0cQdrLBndasj7hOWsL+R9kOBOHGrH1zMKr8jeMX8o0Jsvt
+      RiqFuknuMqwXnf9/+Ey+Gt105LZ0n9ZWUEV5PYtsJiKk1TK//qg21fB7jWKxSqzo
+      dz70J9RkFBnTQi08gj1wlVmGfUNg2UQfq20JIyKKwBRHli38O4a7g0LtyPipt7q4
+      l1ObdRo9flsBBCYtYkwsB1y2XbGbMnYq9gcWok8I7lmvXfSroCau4dJb+jgtHx/L
+      4hk8w5M0Mf1FwZa+JAlRje8dr6pXGKXg8PZq/p2XwjL3HQjamBi2rNSszfp0/e4N
+      AgMBAAGjIzAhMA4GA1UdDwEB/wQEAwICpDAPBgNVHRMBAf8EBTADAQH/MA0GCSqG
+      SIb3DQEBCwUAA4IBAQBNiERCOgZblj0iHXxySBfOi/ywvxroZMIFH4ZVrKZ88l/K
+      PwCkQcNq25NDKiq8oNOvurXHrJPuPgH+2L3FHUnZN/txMXetrJkyHNxHhuVzqHRL
+      Eib6ldgfX9QrNJZad4tMdIF5uLZ4nkenmOLGn6y504vUWCKjaPoXFrDjtWtxfWNU
+      ii/CLZ5AmfFmET5baaTpF/HB12EdFfpmbfBgTkA6uuC1RUbzLYV8J317f2fvhiBC
+      xprCjNhPVkcvdVgyK4lb+LYZ7HWQg0WV4Fr8q4iL2nKn6ogW4nEUoZntTg95g91X
+      ICVMObKtVip3BDT5rJmjrr+2fG/tcS13kvNcZuVe
+      -----END CERTIFICATE-----
+  tasks:
+  - name: Trust Slave OpenShift (Copy SSL CA Cert)
+    blockinfile:
+      path: /etc/ssl/glusterfs.ca
+      block: "{{ openshift_ca }}"
+
+- hosts: localhost  # bastion
+  connection: local
+  vars:
+    id_rsa: |
+      -----BEGIN RSA PRIVATE KEY-----
+      MIIEowIBAAKCAQEAtPyDQGo8lWXSw3/Cd8Whx5GuWF4Zx89NWlgT0GVkN4KU16c+
+      T8+qJcR8pSyCbiMOVqIzCVH7RZIG+eBiILBDpPxSYz/klzwk7DTkwOf6VM8mwI2s
+      zF/U/6aX3+PtTnF5wV4mId7zn3ppGRgzkYLlv8L+EBiW8zAMB4kY8FPV9PENHAkW
+      JgpJwmqski7Iw1MjrhxR9FnIDoG7lPBhoUV6LocHlFeKRAVahzCas+V8dUAuo2CO
+      k1NF5sSE6jI0mtuQevtlyxKi1L7ei6QC+FzDsAhTkKjsOuwaPlXt8RPM5F61W6k1
+      3/leynRz5r5k3V2CR0TZLdPD5voatYXVb6uuYwIDAQABAoIBADvrxoDTK4/DEI7N
+      g9MnybJLV0/Gh/6RcejRdG3ww8dlImZr5sOB27F5ZlNBc0WHsb2ZIhCZ5flYqZqd
+      YZ+0/BBpwdU+WC6CKS9TK9F6fHULyKbDwUxBBkJGI85qpizsgQU2aKWaLUrFunom
+      exxYHDzrEDbADWoipDjyeSFIgHQBs/Nx9p0r7wAfC9G6wsIqneQAz8zQ9T02RF1u
+      n4f9T/1Blull1A3MV1MpYJ0AvS4E0JM+vOv43B3I3nB2HXGsjIfL3kFLAPgFUY3u
+      rfMHbEAJKxl73ihhUA93T13mACWnSGv19+x9CB8fmMpaDhdSV4dAZnthv7fOjauT
+      KptjTXECgYEA6blZTXr6JV48H/8awnb1m+ok/XDbQna8rMDb9a8a7bDq5JooOvau
+      FuWHQATUGmZl/ucHqFdayM4ptihVUHK/fiz3Q1T3rZpv4mvEvFbsaGMFqqPLIgbH
+      c5vrdzR/rgHXhJE2bdpPSTJWxYSTkVfQtvfWvsI2OrZhc4vOc62KkZcCgYEAxjxp
+      9e/RNTcQguQIDissGD2NJcXo6yCQub4Td2gdqk9jmNq+zrRuEaLVRS7N3vI0vk5S
+      /4uKhvm6iuCsbMKY0xXT7RJxGy7EMcS9OjLZTKdYX4Imow3OC8i4fPOvKW/IydLw
+      RQgheebWcaV0d1ZB11lvl8q7EOAzB0VEcMJdyxUCgYEA0K9iAUBQoZTmcltA9Wlq
+      G3CQ3oop+8ow5L6+pztV++z/jmXmjd87yc3fWVX2XCwZ3eNCfxigQrNxoueYZWBP
+      gsV7cW8oRqWiSLSY0OF77CieIqJk+Vi8NYl+UM1bQ275k7BkvOkz6dM8jte1Ow0B
+      mpzn7SNTcFDv6k9mYvsMwrkCgYA6AONgOtOUJpCGPAK/YpJ8ZUYvj0Efy1+Nebho
+      b+Z+NsyFpTu/b7vlHSgaHh/O5D/aj0Bp1YKrC9cxW5wYFrhwyyo/a+38biqqBU75
+      AHfknfKVv5dejmODvy98IDFYhoTRyQ7UpBRnfsuwZSE26d5KDLlCSOeDgJZtwi7M
+      b5LSIQKBgHNYHEOu/P5n9azc8LcRT7Icc+6hrasbPeJCX0nBYQfUx4tG4y1xdYBQ
+      1H1XRop90dflxBhML3DQDureKusjUbuL4UxIQa9YbGXWcjM0EuSRHPfhwhM1SXHf
+      hQ7eDA+fgrX6S6tnX6+Y/QssJK0rB4M0DxcEIXDOKpz2csmYe+G4
+      -----END RSA PRIVATE KEY-----
+    id_rsa_pub: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC0/INAajyVZdLDf8J3xaHHka5YXhnHz01aWBPQZWQ3gpTXpz5Pz6olxHylLIJuIw5WojMJUftFkgb54GIgsEOk/FJjP+SXPCTsNOTA5/pUzybAjazMX9T/ppff4+1OcXnBXiYh3vOfemkZGDORguW/wv4QGJbzMAwHiRjwU9X08Q0cCRYmCknCaqySLsjDUyOuHFH0WcgOgbuU8GGhRXouhweUV4pEBVqHMJqz5Xx1QC6jYI6TU0XmxITqMjSa25B6+2XLEqLUvt6LpAL4XMOwCFOQqOw67Bo+Ve3xE8zkXrVbqTXf+V7KdHPmvmTdXYJHRNkt08Pm+hq1hdVvq65j kpmguser@kpmguser-bastion"
+    k8s_objects:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: georepl
+    - apiVersion: v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: cluster-admin-glusterfs-georepl
+      roleRef:
+        name: cluster-admin
+      subjects:
+      - kind: ServiceAccount
+        name: georepl
+        namespace: glusterfs
+      userNames:
+      - system:serviceaccount:glusterfs:georepl
+    - kind: Secret
+      apiVersion: v1
+      metadata:
+        name: georepl-keys
+        namespace: glusterfs
+      stringData:
+        id_rsa:          "{{ id_rsa     }}"
+        authorized_keys: "{{ id_rsa_pub }}"
+        secret.pem.pub:  "{{ id_rsa_pub }}"
+        secret.pem:      "{{ id_rsa     }}"
+        sshd_config: |
+          Port 2222
+          HostKey /etc/ssh/ssh_host_rsa_key
+          HostKey /etc/ssh/ssh_host_ecdsa_key
+          HostKey /etc/ssh/ssh_host_ed25519_key
+          SyslogFacility AUTHPRIV
+          AuthorizedKeysFile	.ssh/authorized_keys
+          PasswordAuthentication yes
+          PermitRootLogin yes
+          ChallengeResponseAuthentication no
+          GSSAPIAuthentication yes
+          GSSAPICleanupCredentials no
+          UsePAM yes
+          X11Forwarding yes
+          AcceptEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES
+          AcceptEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT
+          AcceptEnv LC_IDENTIFICATION LC_ALL LANGUAGE
+          AcceptEnv XMODIFIERS
+          Subsystem	sftp	/usr/libexec/openssh/sftp-server
+    k8s_patches:
+#      storageclass/glusterfs-storage:
+#        parameters:
+#          volumeOptions: "features.read-only on, performance-quick-read off, cluster.enable-shared-storage enable, batch-fsync-delay-usec 0"
+      ds/glusterfs-storage:
+        spec:
+          updateStrategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxUnavailable: 1
+          template:
+            spec:
+              volumes:
+              - name: georepl-keys
+                secret:
+                  defaultMode: 448
+                  secretName: georepl-keys 
+              containers:
+              - name: glusterfs
+                volumeMounts:
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/secret.pem
+                  subPath: secret.pem
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/secret.pem.pub
+                  subPath: secret.pem.pub
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/common_secret.pem
+                  subPath: secret.pem
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/common_secret.pem.pub
+                  subPath: secret.pem.pub
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/tar_ssh.pem
+                  subPath: secret.pem
+                - name: georepl-keys
+                  mountPath: /var/lib/glusterd/geo-replication/tar_ssh.pem.pub
+                  subPath: secret.pem.pub
+                - name: georepl-keys
+                  mountPath: /root/.ssh/authorized_keys
+                  subPath: authorized_keys
+                - name: georepl-keys
+                  mountPath: /root/.ssh/id_rsa
+                  subPath: id_rsa
+                - name: georepl-keys
+                  mountPath: /etc/ssh/sshd_config
+                  subPath: sshd_config
+
+  tasks:
+  - name: Create backup project
+    shell: oc adm new-project backup
+    ignore_errors: true  #if project already exists
+
+  - name: Create new objects
+    shell: oc -n glusterfs apply -f -
+    args:
+      stdin: "{{ item | to_json }}"
+    with_items: "{{ k8s_objects }}"
+    register: cmd
+    failed_when: cmd.rc >= 2
+
+  - name: Patch existing objects
+    shell: "oc -n glusterfs patch {{ item.key }} --patch '{{ item.value | to_json }}'"
+    with_dict: "{{ k8s_patches }}"
+    register: cmd
+    failed_when: cmd.rc >= 2
+

@@ -1,0 +1,86 @@
+#!/usr/bin/ansible-playbook -vvv
+---
+- hosts: localhost  # bastion
+  connection: local
+  vars:
+    k8s_objects:
+    - apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+        creationTimestamp: null
+        name: default-glusterfs-storage
+      parameters:
+        resturl: http://heketi-storage.glusterfs.svc.cluster.local:8080
+        restuser: admin
+        secretName: heketi-storage-admin-secret
+        secretNamespace: glusterfs
+        volumenameprefix: gm
+        volumeoptions: "cluster.consistent-metadata on, performance.quick-read off, batch-fsync-delay-usec 0, geo-replication.indexing on, client.ssl on, server.ssl on"
+      provisioner: kubernetes.io/glusterfs
+      reclaimPolicy: Delete
+    - apiVersion: v1
+      kind: Template
+      metadata:
+        creationTimestamp: null
+        name: blockhost-pvc
+        namespace: backup
+      objects:
+      - apiVersion: v1
+        kind: PersistentVolume
+        metadata:
+          annotations:
+            Description: 'Gluster-Internal: BlockHost volume'
+            gluster.kubernetes.io/heketi-volume-id: "${ID}"
+            gluster.org/type: file
+            kubernetes.io/createdby: backup-controller
+            pv.kubernetes.io/provisioned-by: kubernetes.io/glusterfs
+            volume.beta.kubernetes.io/mount-options: auto_unmount
+          creationTimestamp: null
+          name: "blockhost-${SHORTID}"
+          namespace: backup
+        spec:
+          accessModes:
+          - ReadWriteOnce
+          capacity:
+            storage: "${SIZE}Gi"
+          glusterfs:
+            endpoints: glusterfs-cluster
+            path: "${NAME}"
+          persistentVolumeReclaimPolicy: Retain
+          storageClassName: default-glusterfs-storage
+      - apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          annotations:
+            volume.beta.kubernetes.io/storage-provisioner: kubernetes.io/glusterfs
+          creationTimestamp: null
+          name: "blockhost-${SHORTID}"
+          namespace: backup
+        spec:
+          accessModes:
+          - ReadWriteOnce
+          resources:
+            requests:
+              storage: "${SIZE}Gi"
+          storageClassName: default-glusterfs-storage
+          volumeName: "blockhost-${SHORTID}"
+      parameters:
+      - name: NAME
+      - name: ID
+      - name: SHORTID
+      - name: SIZE
+
+  tasks:
+  - name: Delete objects
+    shell: "oc -n backup delete storageclass/default-glusterfs-storage template/blockhost-pvc"
+    ignore_errors: true
+
+  - name: Recreate objects
+    shell: "oc create -f -"
+    args:
+      stdin: "{{ item | to_json }}"
+    with_items: 
+      "{{ k8s_objects }}"
+

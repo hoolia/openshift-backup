@@ -1,0 +1,28 @@
+#!/usr/bin/ansible-playbook -vvv
+# 
+# This playbook is to be run on the Slave cluster.
+# This playbook assumes there is the `oc` binary with an active session to the Slave OpenShift cluster to promote.
+---
+- hosts: glusterfs
+  vars:
+    master_openshift_subnet: 10.180.25.0/24
+  tasks:
+  - name: Block original master->slave replication flow
+    iptables:
+      chain: INPUT
+      source: "{{ master_openshift_subnet }}"
+      jump: REJECT
+
+- hosts: localhost #bastion
+  connection: local
+  vars:
+    gluster_cli: "oc -n glusterfs rsh ds/glusterfs-storage bash -c "
+  tasks:
+  - name: Set Gluster Volumes options
+    shell: "{{ gluster_cli }} 'gluster volume list |xargs -L1 -I% gluster volume set % {{ item.key }} {{ item.value }}'"
+    with_dict:
+      geo-replication.indexing: on
+      changelog: on
+      features.read-only: off
+      performance.quick-read: on
+

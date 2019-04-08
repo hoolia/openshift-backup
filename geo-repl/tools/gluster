@@ -1,0 +1,2 @@
+#!/bin/sh
+oc -n glusterfs rsh ds/glusterfs-storage gluster $@

@@ -1,0 +1,33 @@
+#!/usr/bin/ansible-playbook -vvv
+---
+- hosts: localhost  # bastion
+  connection: local
+  vars:
+    k8s_objects:
+    - apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+        name: default-glusterfs-storage
+      parameters:
+        resturl: http://heketi-storage.glusterfs.svc.cluster.local:8080
+        restuser: admin
+        secretName: heketi-storage-admin-secret
+        secretNamespace: glusterfs
+        volumenameprefix: gs
+        volumeoptions: "cluster.consistent-metadata on, features.read-only on, performance.quick-read off, batch-fsync-delay-usec 0, geo-replication.indexing on, client.ssl on, server.ssl on"
+      provisioner: kubernetes.io/glusterfs
+      reclaimPolicy: Delete
+
+  tasks:
+  - name: Delete objects
+    shell: "oc delete storageclass/default-glusterfs-storage"
+
+  - name: Recreate objects
+    shell: "oc create -f -"
+    args:
+      stdin: "{{ item | to_json }}"
+    with_items: 
+      "{{ k8s_objects }}"
+

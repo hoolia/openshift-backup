@@ -1,0 +1,598 @@
+---
+- hosts: masters[0]
+  connection: local
+  vars:
+    k8s_objects:
+    - kind: Template
+      apiVersion: v1
+      metadata:
+        name: backup
+        namespace: backup
+        annotations:
+          description: Scheduled Task to Regularly Backup OpenShift
+          iconClass: icon-shadowman
+          tags: management,cronjob,backup
+      labels:
+        template: backup
+      objects:
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          creationTimestamp: null
+          name: backup-scripts
+          namespace: backup
+          labels:
+            template: backup
+        data:
+          monitor-pvc.sh: |
+            #!/bin/bash -x
+
+            oc observe --all-namespaces pvc \
+               -a '{ .spec.resources.requests.storage }' \
+               -a '{ .metadata.annotations.volume\.beta\.kubernetes\.io\/storage-provisioner }' \
+               -a '{ .spec.volumeName }' \
+               --delete delete-cronjob.sh \
+               --       create-cronjob.sh
+          daily.sh: |
+            #!/bin/bash -x
+
+            delete-snapshot.sh ${NAMESPACE} ${NAME} ${SIZE} `date -d now-$RETENTION +%Y%m%d`;
+            create-snapshot.sh ${NAMESPACE} ${NAME} ${SIZE} `date -d now            +%Y%m%d`;
+          create-cronjob.sh: |
+            #!/bin/bash -x
+
+            NAMESPACE=$1
+            NAME=$2
+            SIZE=$3
+            STORAGECLASS=$4
+            VOLUME=$5
+
+            [ "$VOLUME" == "" ] && echo "Claim not yet bound. Ignoring." && exit 0
+
+            case "$STORAGECLASS" in
+            "gluster.org/glusterblock")
+              # Since Gluster-Block doesn't support snapshot we will snapshot the (Gluster-File) "blockhost" volume on which the Gluster-Block raw image is hosted.
+              # Get a list of "blockhost" volumes and create a PVC for it, so that it will be picked up by the backup-controller as a Gluster-File to backup. 
+              VOLUMES=`heketi-cli volume list --json |jq volumes`
+              for VOLUME in $VOLUMES; do
+                BLOCKHOST=`heketi-cli volume info $VOLUME --json |jq block`
+                if [ "$BLOCKHOST" == "True" ]; then
+                  SIZE=`heketi-cli volume info $VOLUME --json |jq size`
+                  ID=`  heketi-cli volume info $VOLUME --json |jq id  `
+                  NAME=`heketi-cli volume info $VOLUME --json |jq name`
+                  oc -n backup process -p NAME=$NAME -p SHORTID="${ID: -8}" -p ID=$ID -p SIZE=$SIZE blockhost-pvc |oc -n backup create -f -
+                fi
+              done
+              ;;
+            "volumesnapshot.external-storage.k8s.io/snapshot-promoter")
+              # A VolumeSnapshot has been created and a PVC pointing to it, ready to be mounted, so let's schedule the backup job immediately.
+              VOLUME=`oc get pv $VOLUME -o jsonpath='{.spec.glusterfs.path}'`
+              gluster volume start $VOLUME
+              oc -n backup process -p NAME=$NAME -p NAMESPACE=$NAMESPACE -p VOLUME=$VOLUME job |oc -n backup create -f -
+              ;;
+            *)
+              # A normal userdata PVC has been created, so let's create a schedule for periodic backup.
+              oc -n backup process -p NAME=$NAME -p NAMESPACE=$NAMESPACE -p SIZE=$SIZE cronjob |oc -n backup create -f -
+              ;;
+            esac
+
+            exit 0
+          delete-cronjob.sh: |
+            #!/bin/bash -x
+
+            oc -n backup process -p NAME=$2 -p NAMESPACE=$1 -p SIZE=$3 cronjob |oc -n backup delete -f -
+            exit 0
+          create-snapshot.sh: |
+            #!/bin/bash -x
+
+            NAMESPACE=$1
+            NAME=$2
+            SIZE=$3
+            DATE=$4
+
+            oc -n backup process -p NAME=$NAME -p NAMESPACE=$NAMESPACE -p SIZE=$SIZE -p DATE=$DATE snapshot |oc -n $NAMESPACE create -f -
+            exit 0
+          delete-snapshot.sh: |
+            #!/bin/bash -x
+
+            NAMESPACE=$1
+            NAME=$2
+            SIZE=$3
+            DATE=$4
+
+            oc -n backup process -p NAME=$NAME -p NAMESPACE=$NAMESPACE -p SIZE=$SIZE -p DATE=$DATE snapshot |oc -n $NAMESPACE delete -f -
+            exit 0
+          copy-volume.sh: |
+            #!/bin/bash -x
+
+            rm -rf "/destination/${NAMESPACE}/${NAME 0:-9}"   #TODO: alternative: just remove 'date'-suffix from Snapshot PVC
+            mkdir -p "/destination/${NAMESPACE}/${NAME}/"
+            cd /source
+            rsync -va . "/destination/${NAMESPACE}/${NAME}/"
+          gluster: |
+            #!/bin/sh
+            oc -n glusterfs rsh ds/glusterfs-storage gluster $@
+          heketi-cli: |
+            #!/bin/sh
+            oc -n glusterfs rsh dc/heketi-storage \
+              bash -c "heketi-cli --user admin --secret \$HEKETI_ADMIN_KEY $*"
+          jq: |
+            #!/usr/bin/python
+            from __future__ import print_function
+            import sys, json
+            
+            try:
+              result=json.load(sys.stdin)[sys.argv[1]]
+              if isinstance(result, list):
+                print(*result, sep='\n')
+              else:
+                  print(result)
+            except:
+              pass
+      - apiVersion: v1
+        kind: RoleBinding
+        metadata:
+          creationTimestamp: null
+          name: backup
+          namespace: backup
+        roleRef:
+          name: admin
+        subjects:
+        - kind: ServiceAccount
+          name: backup
+          namespace: backup
+        userNames:
+        - system:serviceaccount:backup:backup
+      - apiVersion: v1
+        kind: RoleBinding
+        metadata:
+          creationTimestamp: null
+          name: volumesnapshot-admin
+          namespace: backup
+        roleRef:
+          name: volumesnapshot-admin
+        subjects:
+        - kind: ServiceAccount
+          name: backup
+          namespace: backup
+        userNames:
+        - system:serviceaccount:backup:backup
+      - apiVersion: v1
+        kind: DeploymentConfig
+        metadata:
+          creationTimestamp: null
+          labels:
+            template: backup
+          name: backup-controller
+          namespace: backup
+        spec:
+          replicas: 1
+          revisionHistoryLimit: 1
+          selector:
+            app: backup-controller
+            deploymentconfig: backup-controller
+          strategy:
+            activeDeadlineSeconds: 21600
+            resources: {}
+            rollingParams:
+              intervalSeconds: 1
+              maxSurge: 25%
+              maxUnavailable: 25%
+              timeoutSeconds: 600
+              updatePeriodSeconds: 1
+            type: Rolling
+          template:
+            metadata:
+              creationTimestamp: null
+              labels:
+                template: backup
+                app: backup-controller
+                deploymentconfig: backup-controller
+            spec:
+              containers:
+              - command:
+                - /usr/local/bin/monitor-pvc.sh
+                image: registry.access.redhat.com/openshift3/jenkins-slave-base-rhel7:latest
+                imagePullPolicy: IfNotPresent
+                name: backup-controller
+                volumeMounts:
+                - mountPath: /usr/local/bin
+                  name: backup-scripts
+              dnsPolicy: ClusterFirst
+              restartPolicy: Always
+              securityContext: {}
+              serviceAccountName: backup
+              serviceAccount: backup
+              terminationGracePeriodSeconds: 30
+              volumes:
+              - configMap:
+                  defaultMode: 365
+                  name: backup-scripts
+                name: backup-scripts
+          test: false
+          triggers:
+          - type: ConfigChange
+      - apiVersion: v1
+        kind: Template
+        metadata:
+          creationTimestamp: null
+          name: blockhost-pvc
+          namespace: backup
+        objects:
+        - apiVersion: v1
+          kind: Service
+          metadata:
+            creationTimestamp: null
+            name: glusterfs-cluster
+            namespace: backup
+            labels:
+              gluster.kubernetes.io/provisioned-for-pvc: "blockhost-${SHORTID}"
+          spec:
+            ports:
+            - port: 1
+              protocol: TCP
+              targetPort: 1
+            sessionAffinity: None
+            type: ClusterIP
+        - apiVersion: v1
+          kind: Endpoints
+          metadata:
+            creationTimestamp: null
+            name: glusterfs-cluster
+            namespace: backup
+            labels:
+              gluster.kubernetes.io/provisioned-for-pvc: "blockhost-${SHORTID}"
+          subsets:
+          - addresses:
+            - ip: 10.1.0.21
+            - ip: 10.1.0.22
+            - ip: 10.1.0.24
+            ports:
+            - port: 1
+              protocol: TCP
+        - apiVersion: v1
+          kind: PersistentVolume
+          metadata:
+            annotations:
+              Description: 'Gluster-Internal: BlockHost volume'
+              gluster.kubernetes.io/heketi-volume-id: "${ID}"
+              gluster.org/type: file
+              kubernetes.io/createdby: backup-controller
+              pv.kubernetes.io/provisioned-by: kubernetes.io/glusterfs
+              volume.beta.kubernetes.io/mount-options: auto_unmount
+            creationTimestamp: null
+            name: "blockhost-${SHORTID}"
+            namespace: backup
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            capacity:
+              storage: "${SIZE}Gi"
+            glusterfs:
+              endpoints: glusterfs-cluster
+              path: "${NAME}"
+            persistentVolumeReclaimPolicy: Retain
+            storageClassName: default-glusterfs-storage
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            annotations:
+              volume.beta.kubernetes.io/storage-provisioner: kubernetes.io/glusterfs
+            creationTimestamp: null
+            name: "blockhost-${SHORTID}"
+            namespace: backup
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            resources:
+              requests:
+                storage: "${SIZE}Gi"
+            storageClassName: default-glusterfs-storage
+            volumeName: "blockhost-${SHORTID}"
+        parameters:
+        - name: NAME
+        - name: ID
+        - name: SHORTID
+        - name: SIZE
+      - apiVersion: v1
+        kind: Template
+        metadata:
+          creationTimestamp: null
+          name: snapshot
+          namespace: backup
+        objects:
+        - apiVersion: v1
+          kind: Service
+          metadata:
+            creationTimestamp: null
+            name: glusterfs-cluster
+            namespace: ${NAMESPACE}
+            labels:
+              gluster.kubernetes.io/provisioned-for-pvc: ${NAME}
+          spec:
+            ports:
+            - port: 1
+              protocol: TCP
+              targetPort: 1
+            sessionAffinity: None
+            type: ClusterIP
+        - apiVersion: v1
+          kind: Endpoints
+          metadata:
+            creationTimestamp: null
+            name: glusterfs-cluster
+            namespace: ${NAMESPACE}
+            labels:
+              gluster.kubernetes.io/provisioned-for-pvc: ${NAME}
+          subsets:
+          - addresses:
+            - ip: 10.1.0.21 #TODO: Dynamic Var
+            - ip: 10.1.0.22
+            - ip: 10.1.0.24
+            ports:
+            - port: 1
+              protocol: TCP
+        - apiVersion: volumesnapshot.external-storage.k8s.io/v1
+          kind: VolumeSnapshot
+          metadata:
+            name: ${NAME}-${DATE}
+            namespace: ${NAMESPACE}
+          spec:
+            persistentVolumeClaimName: ${NAME}
+        - apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: ${NAME}-${DATE}
+            namespace: ${NAMESPACE}
+            annotations:
+              snapshot.alpha.kubernetes.io/snapshot: ${NAME}-${DATE}
+          spec:
+            accessModes:
+            - ReadWriteOnce
+            dataSource:
+              apiGroup: volumesnapshot.external-storage.k8s.io
+              kind: VolumeSnapshot
+              name: ${NAME}-${DATE}
+              namespace: ${NAMESPACE}
+            resources:
+              requests:
+                storage: ${SIZE}
+            storageClassName: snapshot-promoter
+        parameters:
+        - name: DATE
+        - name: NAME
+        - name: NAMESPACE
+        - name: SIZE
+          value: 1Gi
+      - apiVersion: v1
+        kind: Template
+        metadata:
+          creationTimestamp: null
+          name: job
+          namespace: backup
+        objects:
+        - apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: snapshot-${NAMESPACE}-${NAME}
+            namespace: backup
+          spec:
+            template:
+              spec:
+                activeDeadlineSeconds: 14400
+                containers:
+                - command:
+                  - /usr/local/bin/copy-volume.sh
+                  env:
+                  - name: NAME
+                    value: ${NAME}
+                  - name: NAMESPACE
+                    value: ${NAMESPACE}
+                  image: registry.access.redhat.com/openshift3/jenkins-slave-base-rhel7
+                  name: copy-volume
+                  volumeMounts:
+                  - mountPath: /destination
+                    name: destination
+                  - mountPath: /source
+                    name: source
+                  - mountPath: /usr/local/bin
+                    name: backup-scripts
+                dnsPolicy: ClusterFirst
+                nodeSelector:
+                  kubernetes.io/hostname: ${NODE_SELECTOR}
+                restartPolicy: Never
+                securityContext:
+                  runAsUser: 0
+                serviceAccount: backup
+                serviceAccountName: backup
+                terminationGracePeriodSeconds: 30
+                volumes:
+                - name: source
+                  glusterfs:
+                    endpoints: glusterfs-cluster
+                    path: ${VOLUME}
+                    readOnly: true
+                - hostPath:
+                    path: /backupdisk
+                  name: destination
+                - configMap:
+                    defaultMode: 365
+                    name: backup-scripts
+                  name: backup-scripts
+        parameters:
+        - name: VOLUME
+        - name: NAME
+        - name: NAMESPACE
+      - apiVersion: v1
+        kind: Template
+        metadata:
+          creationTimestamp: null
+          name: cronjob
+          namespace: backup
+        objects:
+        - apiVersion: batch/v1beta1
+          kind: CronJob
+          metadata:
+            name: backup-${NAMESPACE}-${NAME}
+            namespace: backup
+          spec:
+            concurrencyPolicy: Forbid
+            failedJobsHistoryLimit: 1
+            jobTemplate:
+              spec:
+                activeDeadlineSeconds: 14400
+                backoffLimit: 1
+                template:
+                  spec:
+                    activeDeadlineSeconds: 14400
+                    containers:
+                    - command:
+                      - /usr/local/bin/daily.sh
+                      env:
+                      - name: NAME
+                        value: ${NAME}
+                      - name: NAMESPACE
+                        value: ${NAMESPACE}
+                      - name: SIZE
+                        value: ${SIZE}
+                      - name: RETENTION
+                        value: ${RETENTION}
+                      image: registry.access.redhat.com/openshift3/jenkins-slave-base-rhel7
+                      name: daily
+                      volumeMounts:
+                      - mountPath: /usr/local/bin
+                        name: backup-scripts
+                      securityContext:
+                        runAsUser: 0
+                    dnsPolicy: ClusterFirst
+                    nodeSelector:
+                      kubernetes.io/hostname: ${NODE_SELECTOR}
+                    restartPolicy: Never
+                    securityContext:
+                      runAsUser: 0
+                    serviceAccount: backup
+                    serviceAccountName: backup
+                    terminationGracePeriodSeconds: 30
+                    volumes:
+                    - configMap:
+                        defaultMode: 365
+                        name: backup-scripts
+                      name: backup-scripts
+            schedule: "${SCHEDULE}"
+            successfulJobsHistoryLimit: 1
+        parameters:
+        - name: NAME
+        - name: NAMESPACE
+        - name: SIZE
+          value: 1Gi
+      parameters:
+      - name: RETENTION
+        value: "{{ RETENTION | default('2days') }}"
+      - name: SCHEDULE
+        displayName: Cron Schedule
+        description: Cron Schedule to Execute the Job
+        value: "{{ SCHEDULE | default('0 0 * * *') }}"
+        required: true
+      - name: "NODE_SELECTOR"
+        displayName: "Master node selector"
+        description: "Node selector to run on master"
+        value: "{{ NODE_SELECTOR || default(cluster_name + '-master-0') }}"
+        required: true
+    - kind: Template
+      apiVersion: v1
+      metadata:
+        name: restore
+        namespace: backup
+        annotations:
+          description: Restore an individual volume
+          iconClass: icon-shadowman
+          tags: management,cronjob,backup
+      labels:
+        template: backup
+      objects:
+      - apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          creationTimestamp: null
+          name: restore-scripts
+          namespace: backup
+          labels:
+            template: backup
+        data:
+          restore.sh: |
+            #!/bin/bash -x
+
+            cd /destination
+            rsync -va . /source/
+            cd -
+      - apiVersion: v1
+        kind: DeploymentConfig
+        metadata:
+          creationTimestamp: null
+          labels:
+            template: backup
+          name: restore-${NAME}
+        spec:
+          replicas: 1
+          revisionHistoryLimit: 1
+          selector:
+            app: restore-${NAME}
+            deploymentconfig: restore-${NAME}
+          strategy:
+            activeDeadlineSeconds: 21600
+            resources: {}
+            recreateParams: {}
+            type: Recreate
+          template:
+            metadata:
+              creationTimestamp: null
+              labels:
+                template: restore
+                app: restore-${NAME}
+                deploymentconfig: restore-${NAME}
+            spec:
+              containers:
+              - command:
+                - /bin/bash
+                - -c
+                - "sleep 600"
+                image: registry.access.redhat.com/openshift3/jenkins-slave-base-rhel7
+                name: restore
+                volumeMounts:
+                - mountPath: /destination
+                  name: destination
+                - mountPath: /source
+                  name: source
+                - mountPath: /usr/local/bin
+                  name: restore-scripts
+              dnsPolicy: ClusterFirst
+              restartPolicy: Always
+              terminationGracePeriodSeconds: 30
+              volumes:
+              - name: source
+                persistentVolumeClaim:
+                  claimName: ${NAME}
+              - name: destination
+                persistentVolumeClaim:
+                  claimName: ${NAME}-${DATE}
+              - configMap:
+                  defaultMode: 365
+                  name: restore-scripts
+                name: restore-scripts
+          test: false
+          triggers:
+          - type: ConfigChange
+      parameters:
+      - name: NAME
+      - name: DATE
+
+  tasks:
+  - name: Create k8s objects
+    command: "oc apply -f -"
+    args:
+      stdin: "{{ item | to_json }}"
+    with_items:
+    - "{{ k8s_objects }}"
+
+  - name: Install backup-controller
+    shell: "oc -n backup process backup | oc -n backup replace -f -"

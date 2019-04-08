@@ -1,0 +1,373 @@
+---
+- hosts: masters[0]
+  vars:
+    cluster_name: deploymentName
+    k8s_objects:
+    - kind: Template
+      apiVersion: v1
+      metadata:
+        name: backup
+        annotations:
+          description: Scheduled Task to Regularly Backup OpenShift
+          iconClass: icon-shadowman
+          tags: management,cronjob,backup
+      labels:
+        template: backup
+      objects:
+      - kind: SecurityContextConstraints
+        metadata:
+          name: backup
+        allowHostDirVolumePlugin: true
+        allowHostIPC: false
+        allowHostNetwork: false
+        allowHostPID: false
+        allowHostPorts: false
+        allowPrivilegedContainer: true
+        allowedCapabilities:
+        - '*'
+        allowedFlexVolumes: []
+        apiVersion: v1
+        defaultAddCapabilities: []
+        fsGroup:
+          type: RunAsAny
+        priority: null
+        readOnlyRootFilesystem: false
+        requiredDropCapabilities: []
+        runAsUser:
+          type: RunAsAny
+        seLinuxContext:
+          type: RunAsAny
+        seccompProfiles:
+        - '*'
+        supplementalGroups:
+          type: RunAsAny
+        users:
+        - system:serviceaccount:backup:backup
+        volumes:
+        - hostPath
+        - configMap
+        - secret
+        - persistentVolumeClaim
+        - glusterfs        
+      - kind: CronJob
+        apiVersion: batch/v1beta1
+        metadata:
+          name: "${JOB_NAME}"
+        spec:
+          schedule: "${SCHEDULE}"
+          concurrencyPolicy: Forbid
+          successfulJobsHistoryLimit: 5
+          failedJobsHistoryLimit: 5
+          jobTemplate:
+            spec:
+              template:
+                spec:
+                  containers:
+                  - name: "${JOB_NAME}"
+                    image: openshift3/jenkins-slave-base-rhel7:v3.9
+                    command:
+                    - "/backup-scripts/${JOB_NAME}.sh"
+                    env:
+                    - name: DIR
+                      value: "${DIR}"
+                    securityContext:
+                      runAsUser: 0
+                      privileged: true
+                    volumeMounts:
+                    - mountPath: /backupdisk
+                      name: backup-disk
+                    - mountPath: /host
+                      name: host
+                    - mountPath: /backup-scripts
+                      name: backup-scripts
+                    - mountPath: /usr/bin/etcdctl
+                      name: etcd-client
+                  restartPolicy: Never
+                  terminationGracePeriodSeconds: 30
+                  activeDeadlineSeconds: 21600
+                  dnsPolicy: ClusterFirst
+                  nodeSelector:
+                    kubernetes.io/hostname: "{{ NODE_SELECTOR | default( cluster_name|default('my') + '-master-0') }}"
+                  serviceAccountName: backup
+                  serviceAccount: backup
+                  securityContext:
+                    runAsUser: 0
+                    privileged: true
+                  volumes:
+                  - name: etcd-client
+                    hostPath:
+                      path: /bin/etcdctl
+                  - name: backup-disk
+                    hostPath:
+                      path: /backupdisk
+                  - name: host
+                    hostPath:
+                      path: /
+                  - configMap:
+                      defaultMode: 493
+                      name: backup-config
+                    name: backup-scripts
+      - kind: ConfigMap
+        apiVersion: v1
+        metadata:
+          name: backup-config
+        data:
+          backup-oc-export-projects.sh: |
+            #!/bin/bash +x
+
+            # Set correct backup directory
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/projects
+
+            mkdir -p $DIR
+            cd $DIR
+
+            # Backup object per project for easy restore
+            for i in `oc get projects --no-headers |grep Active |awk '{print $1}'`
+            do
+              mkdir ${DIR}/$i
+              cd ${DIR}/$i
+              oc export namespace $i >ns.yml
+              oc export project   $i >project.yml
+              for j in pods replicationcontrollers deploymentconfigs buildconfigs services routes pvc quota hpa secrets configmaps daemonsets deployments endpoints imagestreams ingress cronjobs jobs limitranges policies policybindings roles rolebindings resourcequotas replicasets serviceaccounts templates oauthclients statefulsets
+              do
+                mkdir ${DIR}/$i/$j
+                cd ${DIR}/$i/$j
+                for k in `oc get $j -n $i --no-headers |awk '{print $1}'`
+                do
+                  echo export $j $k '-n' $i
+                  oc export $j $k -n $i >$k.yml
+                done
+              done
+              echo "Backed up objects in project $i"
+            done
+            
+          backup-oc-export-global.sh: |
+            #!/bin/bash +x
+
+            # Set correct backup directory
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/global
+
+            mkdir -p $DIR
+            cd $DIR
+
+            # Backup global objects for easy restore
+            for j in  clusternetwork clusterresourcequota clusterrole clusterrolebinding egressnetworkpolicy group hostsubnet identity netnamespace networkpolicy node persistentvolumes securitycontextconstraints customresourcedefinition user
+            do
+              mkdir ${DIR}/$j
+              cd ${DIR}/$j
+              for k in `oc get $j --no-headers |awk '{print $1}'`
+              do
+                echo export $j $k
+                oc export $j $k >$k.yml
+              done
+            done
+            
+          
+          backup-heketi-db.sh: |
+            #!/bin/bash +x
+
+            # Set correct backup directory
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/glusterfs
+
+            mkdir -p $DIR
+            cd $DIR
+            
+            # Backup heketi database
+            oc -n glusterfs rsh dc/heketi-storage bash -c "heketi-cli db dump --user admin --secret \$HEKETI_ADMIN_KEY" > backup-heketidb.json && echo "Heketi database backup succesful"
+
+          backup-etcd.sh: |
+            #!/bin/bash +x
+
+            # Set correct backup directory
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/etcd
+
+            mkdir -p $DIR
+            cd $DIR
+            
+            # etcd database backup
+            echo -n "Creating etcdctl snapshot ... "
+            ETCDCTL_API=3 etcdctl                 \
+              --cert      /host/etc/etcd/peer.crt      \
+              --key       /host/etc/etcd/peer.key      \
+              --cacert    /host/etc/etcd/ca.crt        \
+              --endpoints https://`cat /host/etc/hostname`:2379 \
+              snapshot save etcd_snapshot.db && echo "Etcd backup successful"
+
+          backup-master-config.sh: |
+            #!/bin/bash +x
+
+            # Set correct backup directory
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/
+
+            mkdir -p $DIR/master-config
+            cd $DIR
+
+            # Backup config files
+            rsync -va -X -A /host/etc/ansible/facts.d/openshift.fact \
+                            /host/etc/ansible \
+                            /host/etc/etcd \
+                            /host/etc/origin \
+                            /host/etc/sysconfig/atomic-openshift-master \
+                            /host/etc/sysconfig/atomic-openshift-master-api \
+                            /host/etc/sysconfig/atomic-openshift-master-controllers \
+                            /host/etc/sysconfig/atomic-openshift-node \
+                            /host/etc/systemd/system/atomic-openshift-node.service.wants \
+                            /host/root/.kube \
+                            /host/usr/lib/systemd/system/atomic-openshift-master-api.service \
+                            /host/usr/lib/systemd/system/atomic-openshift-master-controllers.service \
+                            /host/var/lib/etcd \
+                  master-config/ && echo "Master-config successful"
+
+          delete-backup.sh: |
+            #!/bin/bash -x
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/
+
+            cd $DIR
+
+            week_ago=$(date --date="22 days ago" +"%Y%m%d")
+
+            for backup in `ls -1`
+            do
+              timestamp=$(echo $backup | cut -c1-8)
+              if [ "$week_ago" -ge "$timestamp" ];
+              then
+                rm -rf $backup
+                echo "Deleted backup ${backup}"
+              fi
+            done
+
+          create-snapshot.sh: |
+            #!/bin/bash +x
+
+            # Set date variable
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/glusterfs
+
+            mkdir -p $DIR
+            cd $DIR
+            
+            # Get a list of gluster volumes from heketi database
+            gluster_volumes=glustervolumelist-"${DATE}".txt
+            oc -n glusterfs rsh dc/heketi-storage bash -c "heketi-cli volume list --server http://localhost:8080 --user admin --secret \$HEKETI_ADMIN_KEY | /usr/bin/cut -d\":\" -f4" > $gluster_volumes
+
+            # Backup all (non-block) volumes
+            for gluster_volume in `cat $gluster_volumes`
+            do
+              if [[ ! $gluster_volume == *"[block]"* ]]; then
+                # Pause geo-replication in order to make snapshot
+                GEO_SLAVE=oc -n glusterfs rsh ds/glusterfs-storage gluster volume geo-replication $gluster_volume status | grep "Active" | awk '{ print $5 }' | cut -d'/' -f3
+                oc -n glusterfs rsh ds/glusterfs-storage gluster volume geo-replication $gluster_volume $GEO_SLAVE pause
+                
+                # Create snapshot
+                snapname="${DATE}_${gluster_volume}"
+                oc -n glusterfs rsh ds/glusterfs-storage gluster snapshot create $snapname $gluster_volume no-timestamp
+                echo "Creating snapshot $snapname"
+
+                # Resume geo-replication
+                oc -n glusterfs rsh ds/glusterfs-storage gluster volume geo-replication $gluster_volume $GEO_SLAVE resume
+              fi
+            done
+
+          clean-snapshots.sh: |
+            #!/bin/bash +x
+
+            DATE=`date +%Y%m%d`
+            DIR=/backupdisk/${DATE}/glusterfs
+
+            mkdir -p $DIR
+            cd $DIR
+
+            week_ago=$(date --date="8 days ago" +"%Y%m%d")
+            gluster_snapshots=glustersnapshotlist-"${DATE}".txt
+
+            oc -n glusterfs rsh ds/glusterfs-storage gluster snapshot list > $gluster_snapshots
+
+            for gluster_snapshot in `cat $gluster_snapshots`
+            do
+              timestamp=$(echo $gluster_snapshot | cut -c1-8)
+              if [ "$week_ago" -ge "$timestamp" ]; then
+                oc -n glusterfs rsh ds/glusterfs-storage gluster snapshot delete $gluster_snapshot <<< y
+                echo "Delete snapshot $gluster_snapshot"
+
+              fi
+            done
+
+      - kind: ClusterRoleBinding
+        apiVersion: v1
+        metadata:
+          name: ops:backup
+          labels:
+            template: backup
+        roleRef:
+          name: cluster-admin
+        subjects:
+        - kind: ServiceAccount
+          name: backup
+          namespace: backup
+        userNames:
+        - system:serviceaccount:backup:backup
+      - kind: ServiceAccount
+        apiVersion: v1
+        metadata:
+          name: backup
+          labels:
+            template: "backup"
+      parameters:
+      - name: SCHEDULE
+        displayName: Cron Schedule
+        description: Cron Schedule to Execute the Job
+        value: "{{ SCHEDULE | default('0 0 * * *') }}"
+        required: true
+      - name: "NODE_SELECTOR"
+        displayName: "Master node selector"
+        description: "Node selector to run on master"
+        value: "{{ NODE_SELECTOR | default( cluster_name|default('my') + '-master-0') }}"
+        required: true
+      - name: JOB_NAME
+        displayName: Job Name
+        description: Name of the Scheduled Job to Create.
+        value: create_snapshot
+        required: true
+
+  gather_facts: no
+  tasks:
+  - name: Create /backupdisk/ directory
+    file:
+      path: /backupdisk/
+      state: directory
+      mode: 0755
+
+  - name: Allow backup-cronjob access to backup disk (mountpoint)
+    shell: chcon -u system_u -r object_r -t svirt_sandbox_file_t -l s0 /backupdisk
+  
+  - name: create backup project
+    shell: "oc adm new-project backup --node-selector='kubernetes.io/hostname={{ NODE_SELECTOR | default( cluster_name|default('my') + '-master-0') }}'"
+    ignore_errors: true
+
+  - name: deploy backup template
+    shell: oc -n backup apply -f -
+    args:
+      stdin: "{{ item | to_yaml }}"
+    with_items: "{{ k8s_objects }}"
+
+  - name: create backup cronjob
+    shell: |
+      oc -n backup process backup \
+      -p NODE_SELECTOR='{{ cluster_name }}-master-0' \
+      -p JOB_NAME="{{ item }}" \
+      | oc -n backup apply -f -
+    with_items:
+      - backup-oc-export-projects
+      - backup-oc-export-global
+      - backup-heketi-db
+      - backup-etcd
+      - backup-master-config
+      - delete-backup
+      - create-snapshot
+      - clean-snapshots
